@@ -1,414 +1,210 @@
-pragma solidity >=0.8.2 <0.9.0;
-
-interface IXSquared {
-    struct Collection {
-        bytes32 id;
-        uint256 collectionFee; // bips
-        uint256 itemFee; // bips
-        address owner; // collection owner that can update settings
-        address feeDestination; // for collection (item fee destination is set on the items)
-        address allowedItemCreator;
-        uint256 slopeScale;
-        uint256 slopeMagnitude;
-    }
-
-    struct Item {
-        uint256 supply;
-        address feeDestination;
-        string text;
-        bytes data;
-    }
-
-    event Trade(
-        bytes32 collection,
-        bytes32 item,
-        address trader,
-        bool isBuy,
-        uint256 quantity,
-        uint256 supply,
-        uint256 ethAmount,
-        address collectionFeeDestination,
-        uint256 collectionFeeEthAmount,
-        address itemFeeDestination,
-        uint256 itemFeeEthAmount
-    );
-
-    event ItemCreated(bytes32 collection, bytes32 item, address creator, string text, bytes data);
-
-    event CollectionCreated(bytes32 collection, address creator);
-
-    event CollectionSettings(
-        bytes32 collection,
-        uint256 collectionFeePercent,
-        uint256 itemFeePercent,
-        address owner,
-        address feeDestination,
-        address allowedItemCreator
-    );
-    event ItemSettings(bytes32 collection, bytes32 item, address feeDestination);
-
-    function initialize(
-        bytes32 id,
-        uint256 collectionFee,
-        uint256 itemFee,
-        address owner,
-        address feeDestination,
-        address allowedItemCreator,
-        uint256 slopeScale,
-        uint256 slopeMagnitude
-    ) external;
-
-    function updateCollection(
-        uint256 collectionFee,
-        uint256 itemFee,
-        address owner,
-        address feeDestination,
-        address allowedItemCreator
-    ) external;
-
-    function collection() external view returns (Collection memory);
-
-    function items(bytes32 item) external view returns (Item memory);
-
-    function createItem(bytes32 item, address to, address feeDestination, string calldata text, bytes calldata data)
-        external
-        payable;
-
-    function updateItem(bytes32 item, address feeDestination) external;
-
-    function buyItem(bytes32 item, uint256 amount) external payable;
-
-    function sellItem(bytes32 item, uint256 amount) external payable;
-
-    function getPrice(uint256 supply, uint256 amount) external view returns (uint256);
-
-    function getBuyPrice(bytes32 item, uint256 amount) external view returns (uint256);
-
-    function getSellPrice(bytes32 item, uint256 amount) external view returns (uint256);
-
-    function getBuyPriceAfterFee(bytes32 item, uint256 amount) external view returns (uint256);
-
-    function getSellPriceAfterFee(bytes32 item, uint256 amount) external view returns (uint256);
-
-    function balanceOf(bytes32 item, address holder) external view returns (uint256);
-}
-
-## Introduction
-
-XSquared is a protocol for creating and trading royalty-enforcing digital collectibles using bonding curve along the x^2 curve.
-
-XSquared is a decentralized public good. There is no owner, no fee, no governance, and no upgradable functions. There is no website and no Twitter. This contract is the only documentation.
-
-## Models
-
-Items are created within a Collection. Items can be bought and sold. A configurable fee is given to both the Collection-creator and the Item-creator. 
-
-Items have infinite supply and are bought and sold along the x^2 curve. The curve is configured at Collection creation and cannot be changed.
-
-## Collections API
-
-To create a Collection, use `createCollection` on the `XSquaredFactory` which will use CREATE2 to deploy a new contract.
-
-The bonding curve can be configured by using the denominator settings `slopeScale` and `slopeMagnitude`. For example, slopeScale of 4 and slopeMagnitude of 4 will create the curve: x^2 / (4 * 1_0000).
-
-The `feeSetter` address can update the collection fee, the item creator fee, the fee destination, the item creator address, and the `feeSetter` address itself. The bonding curve parameters are not upgradable.
-
-## Buying and Selling API
-
-Items are bought and sold using `buyItem` and `sellItem`. 
-
-The price is calculated using the bonding curve. The price is paid in ETH and the fees are sent to the Collection creator and the Item creator, the remaining ETH is stored within the contract and cannot be withdrawn apart from selling. 
-
-There are no emergency withdrawal functions.
-
-## Items API
-
-Items are identified by a `bytes32`. The protocol is agnostic to what these items are. It provides two fields to store on-chain metadata: 
-
-* `string text`
-* `bytes data`
-
-Use these fields as you wish. 
-
-Create an item with: `createItem(bytes32 item, address to, address feeDestination, string calldata text, bytes calldata data)`.
-
-The `feeDestination` for items can be updated by the current `feeDestination` address.
-
-## Events
-
-The following events are emitted:
-
-* Trade
-* ItemCreated
-* CollectionCreated
-* CollectionSettings
-* ItemSettings
-
-## Building on XSquared
-
-- Create a Collection by calling `createCollection` on XSquaredFactory
-- Create Items with `createItem`
-- Buy the Item with `buyItem`
-- Sell the Item with `sellItem`
-
-Convenience functions for getting prices are provided. 
-
+/**
+ *Submitted for verification at basescan.org on 2023-08-10
 */
 
-contract XSquared is IXSquared {
-    Collection public _collection;
+// File: contracts/Context.sol
 
-    mapping(bytes32 => Item) public _items;
 
-    mapping(bytes32 => mapping(address => uint256)) public balanceOf;
+// OpenZeppelin Contracts v4.4.1 (utils/Context.sol)
 
-    /// @notice Initialize a new collection
-    /// @dev slopeScale and slopeMagnitude define the curve. For example,
-    /// slopeScale of 4 and slopeMagnitude of 4 will create the curve: x^2 / (4 * 1_0000)
-    /// @param id the collection id e.g. keccak256('MYCOLLECTIONUWU')
-    /// @param collectionFee the collection fee percent in bips (max 1000 = 10%)
-    /// @param itemFee the item fee percent in bips (max 1000 = 10%)
-    /// @param owner the address that can change collection settings
-    /// @param feeDestination the address that receives collection fees
-    /// @param allowedItemCreator the address that is allowed to create items
-    /// @param slopeScale the scale of the x^2 curve denominator slope (power of two lte 1024)
-    /// @param slopeMagnitude the magnitude of the x^2 curve denominator slope (number of zeros, 4 = 10000)
-    function initialize(
-        bytes32 id,
-        uint256 collectionFee,
-        uint256 itemFee,
-        address owner,
-        address feeDestination,
-        address allowedItemCreator,
-        uint256 slopeScale,
-        uint256 slopeMagnitude
-    ) public {
-        require(_collection.id == 0, "ALREADY_INITIALIZED");
+pragma solidity ^0.8.0;
 
-        _collection.id = id;
-        _updateCollection(collectionFee, itemFee, owner, feeDestination, allowedItemCreator, slopeScale, slopeMagnitude);
+/**
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
     }
 
-    function updateCollection(
-        uint256 collectionFee,
-        uint256 itemFee,
-        address owner,
-        address feeDestination,
-        address allowedItemCreator
-    ) public {
-        require(_collection.owner == msg.sender, "UNAUTHORIZED_ONLY_COLLECTION_OWNER");
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
 
-        require(_collection.slopeScale != 0, "COLLECTION_NOT_CREATED");
+// File: contracts/Ownable.sol
 
-        _updateCollection(
-            collectionFee,
-            itemFee,
-            owner,
-            feeDestination,
-            allowedItemCreator,
-            _collection.slopeScale, // not changeable
-            _collection.slopeMagnitude // not changeable
-        );
+
+// OpenZeppelin Contracts (last updated v4.7.0) (access/Ownable.sol)
+
+pragma solidity ^0.8.0;
+
+
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
+abstract contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    /**
+     * @dev Initializes the contract setting the deployer as the initial owner.
+     */
+    constructor() {
+        _transferOwnership(_msgSender());
     }
 
-    function _updateCollection(
-        uint256 collectionFee,
-        uint256 itemFee,
-        address owner,
-        address feeDestination,
-        address allowedItemCreator,
-        uint256 slopeScale,
-        uint256 slopeMagnitude
-    ) private {
-        require(collectionFee <= 1000, "COLLECTION_FEE_TOO_HIGH"); // max 10%
-        require(itemFee <= 1000, "ITEM_FEE_TOO_HIGH"); // max 10%
-        require(isPowerOfTwo(slopeScale), "SLOPE_NOT_POWER_OF_TWO");
-        require(slopeMagnitude >= 1 && slopeMagnitude < 10, "SLOPE_MAGNITUDE");
-
-        _collection.collectionFee = collectionFee;
-        _collection.itemFee = itemFee;
-        _collection.owner = owner;
-        _collection.feeDestination = feeDestination;
-        _collection.allowedItemCreator = allowedItemCreator;
-        _collection.slopeScale = slopeScale;
-        _collection.slopeMagnitude = slopeMagnitude;
-
-        emit CollectionSettings(_collection.id, collectionFee, itemFee, owner, feeDestination, allowedItemCreator);
+    /**
+     * @dev Throws if called by any account other than the owner.
+     */
+    modifier onlyOwner() {
+        _checkOwner();
+        _;
     }
 
-    function createItem(bytes32 item, address to, address feeDestination, string calldata text, bytes calldata data)
-        public
-        payable
-    {
-        require(_collection.slopeScale != 0, "COLLECTION_NOT_CREATED");
-        require(
-            _collection.allowedItemCreator == address(0) /* public creation */
-                || _collection.allowedItemCreator == msg.sender,
-            "UNAUTHORIZED_ONLY_ALLOWED_ITEM_CREATOR"
-        );
-
-        uint256 supply = _items[item].supply;
-        require(supply == 0, "ITEM_ALREADY_CREATED");
-
-        _items[item].data = data;
-        _items[item].feeDestination = feeDestination;
-        _items[item].text = text;
-
-        emit ItemCreated(_collection.id, item, to, text, data);
-        emit ItemSettings(_collection.id, item, feeDestination);
-
-        _buyItem(item, to, supply, 1); // buy the first item to actual creator
+    /**
+     * @dev Returns the address of the current owner.
+     */
+    function owner() public view virtual returns (address) {
+        return _owner;
     }
 
-    function updateItem(bytes32 item, address feeDestination) public {
-        require(_items[item].supply > 0, "ITEM_NOT_CREATED");
-        require(_items[item].feeDestination == msg.sender, "UNAUTHORIZED_ONLY_PRIOR_FEE_DESTINATION");
-
-        _items[item].feeDestination = feeDestination;
-
-        emit ItemSettings(_collection.id, item, feeDestination);
+    /**
+     * @dev Throws if the sender is not the owner.
+     */
+    function _checkOwner() internal view virtual {
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
     }
 
-    function buyItem(bytes32 item, uint256 amount) public payable {
-        uint256 supply = _items[item].supply;
-        require(supply > 0, "ITEM_NOT_CREATED");
-
-        _buyItem(item, msg.sender, supply, amount);
+    /**
+     * @dev Leaves the contract without owner. It will not be possible to call
+     * `onlyOwner` functions anymore. Can only be called by the current owner.
+     *
+     * NOTE: Renouncing ownership will leave the contract without an owner,
+     * thereby removing any functionality that is only available to the owner.
+     */
+    function renounceOwnership() public virtual onlyOwner {
+        _transferOwnership(address(0));
     }
 
-    function _buyItem(bytes32 item, address to, uint256 supply, uint256 amount) internal {
-        uint256 price = getPrice(supply, amount);
-        uint256 collectionFee = getCollectionFee(price);
-        uint256 itemFee = getItemFee(price);
-        uint256 totalRequired = price + collectionFee + itemFee;
-
-        require(msg.value >= totalRequired, "INSUFFICIENT_PAYMENT");
-
-        balanceOf[item][to] = balanceOf[item][to] + amount;
-        _items[item].supply = supply + amount;
-
-        address collectionFeeDestination = _collection.feeDestination;
-        address itemFeeDestination = _items[item].feeDestination;
-
-        emit Trade(
-            _collection.id,
-            item,
-            to,
-            true,
-            amount,
-            supply + amount,
-            price,
-            collectionFeeDestination,
-            collectionFee,
-            itemFeeDestination,
-            itemFee
-        );
-
-        collectionFeeDestination.call{value: collectionFee}("");
-        itemFeeDestination.call{value: itemFee}("");
-
-        uint256 excess = msg.value - totalRequired;
-
-        if (excess > 0) {
-            msg.sender.call{value: excess}("");
-        }
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Can only be called by the current owner.
+     */
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
     }
 
-    function sellItem(bytes32 item, uint256 amount) public payable {
-        uint256 supply = _items[item].supply;
-        require(supply > amount, "CANNOT_SELL_LAST_ITEM");
+    /**
+     * @dev Transfers ownership of the contract to a new account (`newOwner`).
+     * Internal function without access restriction.
+     */
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
+    }
+}
 
-        uint256 price = getPrice(supply - amount, amount);
-        uint256 collectionFee = getCollectionFee(price);
-        uint256 itemFee = getItemFee(price);
-        require(balanceOf[item][msg.sender] >= amount, "INSUFFICIENT_HOLDINGS");
+// File: contracts/FriendtechShares.sol
 
-        balanceOf[item][msg.sender] = balanceOf[item][msg.sender] - amount;
-        _items[item].supply = supply - amount;
 
-        address collectionFeeDestination = _collection.feeDestination;
-        address itemFeeDestination = _items[item].feeDestination;
 
-        emit Trade(
-            _collection.id,
-            item,
-            msg.sender,
-            false,
-            amount,
-            supply - amount,
-            price,
-            collectionFeeDestination,
-            collectionFee,
-            itemFeeDestination,
-            itemFee
-        );
+pragma solidity >=0.8.2 <0.9.0;
 
-        collectionFeeDestination.call{value: collectionFee}("");
-        itemFeeDestination.call{value: itemFee}("");
 
-        msg.sender.call{value: price - collectionFee - itemFee}("");
+// TODO: Events, final pricing model, 
+
+contract FriendtechSharesV1 is Ownable {
+    address public protocolFeeDestination;
+    uint256 public protocolFeePercent;
+    uint256 public subjectFeePercent;
+
+    event Trade(address trader, address subject, bool isBuy, uint256 shareAmount, uint256 ethAmount, uint256 protocolEthAmount, uint256 subjectEthAmount, uint256 supply);
+
+    // SharesSubject => (Holder => Balance)
+    mapping(address => mapping(address => uint256)) public sharesBalance;
+
+    // SharesSubject => Supply
+    mapping(address => uint256) public sharesSupply;
+
+    function setFeeDestination(address _feeDestination) public onlyOwner {
+        protocolFeeDestination = _feeDestination;
     }
 
-    function getPrice(uint256 supply, uint256 amount) public view returns (uint256) {
-        uint256 sum1 = supply == 0 ? 0 : ((supply - 1) * (supply) * (2 * (supply - 1) + 1)) / 6;
-        uint256 sum2 = supply == 0 && amount == 1
-            ? 0
-            : ((supply - 1 + amount) * (supply + amount) * (2 * (supply - 1 + amount) + 1)) / 6;
+    function setProtocolFeePercent(uint256 _feePercent) public onlyOwner {
+        protocolFeePercent = _feePercent;
+    }
+
+    function setSubjectFeePercent(uint256 _feePercent) public onlyOwner {
+        subjectFeePercent = _feePercent;
+    }
+
+    function getPrice(uint256 supply, uint256 amount) public pure returns (uint256) {
+        uint256 sum1 = supply == 0 ? 0 : (supply - 1 )* (supply) * (2 * (supply - 1) + 1) / 6;
+        uint256 sum2 = supply == 0 && amount == 1 ? 0 : (supply - 1 + amount) * (supply + amount) * (2 * (supply - 1 + amount) + 1) / 6;
         uint256 summation = sum2 - sum1;
-        uint256 price = (summation * 1 ether) / (_collection.slopeScale * powerOfTen(_collection.slopeMagnitude));
-        require(price < type(uint128).max, "PRICE_OVERFLOW"); // don't fly too close to the sun
-        return price;
+        return summation * 1 ether / 16000;
     }
 
-    function getBuyPrice(bytes32 item, uint256 amount) public view returns (uint256) {
-        return getPrice(_items[item].supply, amount);
+    function getBuyPrice(address sharesSubject, uint256 amount) public view returns (uint256) {
+        return getPrice(sharesSupply[sharesSubject], amount);
     }
 
-    function getSellPrice(bytes32 item, uint256 amount) public view returns (uint256) {
-        return getPrice(_items[item].supply - amount, amount);
+    function getSellPrice(address sharesSubject, uint256 amount) public view returns (uint256) {
+        return getPrice(sharesSupply[sharesSubject] - amount, amount);
     }
 
-    function getBuyPriceAfterFee(bytes32 item, uint256 amount) external view returns (uint256) {
-        uint256 price = getBuyPrice(item, amount);
-        return price + getCollectionFee(price) + getItemFee(price);
+    function getBuyPriceAfterFee(address sharesSubject, uint256 amount) public view returns (uint256) {
+        uint256 price = getBuyPrice(sharesSubject, amount);
+        uint256 protocolFee = price * protocolFeePercent / 1 ether;
+        uint256 subjectFee = price * subjectFeePercent / 1 ether;
+        return price + protocolFee + subjectFee;
     }
 
-    function getSellPriceAfterFee(bytes32 item, uint256 amount) external view returns (uint256) {
-        uint256 price = getSellPrice(item, amount);
-        return price - getCollectionFee(price) - getItemFee(price);
+    function getSellPriceAfterFee(address sharesSubject, uint256 amount) public view returns (uint256) {
+        uint256 price = getSellPrice(sharesSubject, amount);
+        uint256 protocolFee = price * protocolFeePercent / 1 ether;
+        uint256 subjectFee = price * subjectFeePercent / 1 ether;
+        return price - protocolFee - subjectFee;
     }
 
-    function getCollectionFee(uint256 price) internal view returns (uint256) {
-        return (price * _collection.collectionFee) / 10000;
+    function buyShares(address sharesSubject, uint256 amount) public payable {
+        uint256 supply = sharesSupply[sharesSubject];
+        require(supply > 0 || sharesSubject == msg.sender, "Only the shares' subject can buy the first share");
+        uint256 price = getPrice(supply, amount);
+        uint256 protocolFee = price * protocolFeePercent / 1 ether;
+        uint256 subjectFee = price * subjectFeePercent / 1 ether;
+        require(msg.value >= price + protocolFee + subjectFee, "Insufficient payment");
+        sharesBalance[sharesSubject][msg.sender] = sharesBalance[sharesSubject][msg.sender] + amount;
+        sharesSupply[sharesSubject] = supply + amount;
+        emit Trade(msg.sender, sharesSubject, true, amount, price, protocolFee, subjectFee, supply + amount);
+        (bool success1, ) = protocolFeeDestination.call{value: protocolFee}("");
+        (bool success2, ) = sharesSubject.call{value: subjectFee}("");
+        require(success1 && success2, "Unable to send funds");
     }
 
-    function getItemFee(uint256 price) internal view returns (uint256) {
-        return (price * _collection.itemFee) / 10000;
-    }
-
-    function isPowerOfTwo(uint256 n) private pure returns (bool) {
-        return (n != 0) && ((n & (n - 1)) == 0) && (n > 1) && (n <= 1024);
-    }
-
-    function powerOfTen(uint256 n) private pure returns (uint256) {
-        if (n == 1) return 10;
-        if (n == 2) return 100;
-        if (n == 3) return 1000;
-        if (n == 4) return 10000;
-        if (n == 5) return 100000;
-        if (n == 6) return 1000000;
-        if (n == 7) return 10000000;
-        if (n == 8) return 100000000;
-        if (n == 9) return 1000000000;
-        if (n == 10) return 10000000000;
-        return 10;
-    }
-
-    function collection() external view returns (Collection memory) {
-        return _collection;
-    }
-
-    function items(bytes32 id) external view returns (Item memory) {
-        return _items[id];
+    function sellShares(address sharesSubject, uint256 amount) public payable {
+        uint256 supply = sharesSupply[sharesSubject];
+        require(supply > amount, "Cannot sell the last share");
+        uint256 price = getPrice(supply - amount, amount);
+        uint256 protocolFee = price * protocolFeePercent / 1 ether;
+        uint256 subjectFee = price * subjectFeePercent / 1 ether;
+        require(sharesBalance[sharesSubject][msg.sender] >= amount, "Insufficient shares");
+        sharesBalance[sharesSubject][msg.sender] = sharesBalance[sharesSubject][msg.sender] - amount;
+        sharesSupply[sharesSubject] = supply - amount;
+        emit Trade(msg.sender, sharesSubject, false, amount, price, protocolFee, subjectFee, supply - amount);
+        (bool success1, ) = msg.sender.call{value: price - protocolFee - subjectFee}("");
+        (bool success2, ) = protocolFeeDestination.call{value: protocolFee}("");
+        (bool success3, ) = sharesSubject.call{value: subjectFee}("");
+        require(success1 && success2 && success3, "Unable to send funds");
     }
 }
